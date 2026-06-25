@@ -15,7 +15,12 @@ if ! mkimage -A arm64 -O linux -T ramdisk -C none -n uInitrd -d "${INITRD_FILE}"
     echo "update-initramfs: fnnas: ERROR: mkimage failed!" >&2
     exit 0
 fi
-ln -sfn "$(basename "${UINITRD_FILE}")" /boot/uInitrd
+
+# Create symlink to uInitrd for bootloader, fall back to copy if symlink fails
+ln -sfn "$(basename "${UINITRD_FILE}")" /boot/uInitrd 2>/dev/null || {
+    echo "Symlink failed, falling back to copy." >&2
+    cp -fv "${UINITRD_FILE}" /boot/uInitrd
+}
 
 echo "update-initramfs: fnnas: done." >&2
 exit 0

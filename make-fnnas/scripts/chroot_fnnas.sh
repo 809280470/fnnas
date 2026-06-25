@@ -108,12 +108,20 @@ INITRD_FILE="/boot/initrd.img-${K_VER}"
 UINITRD_FILE="/boot/uInitrd-${K_VER}"
 
 echo "update-initramfs: fnnas: Converting to u-boot format: ${UINITRD_FILE}..." >&2
-[ -f "${INITRD_FILE}" ] || { echo "update-initramfs: fnnas: ERROR: initrd not found: ${INITRD_FILE}" >&2; exit 0; }
+[ -f "${INITRD_FILE}" ] || {
+    echo "update-initramfs: fnnas: ERROR: initrd not found: ${INITRD_FILE}" >&2
+    exit 0
+}
 if ! mkimage -A arm64 -O linux -T ramdisk -C none -n uInitrd -d "${INITRD_FILE}" "${UINITRD_FILE}"; then
     echo "update-initramfs: fnnas: ERROR: mkimage failed!" >&2
     exit 0
 fi
-ln -sfn "$(basename "${UINITRD_FILE}")" /boot/uInitrd
+
+# Create symlink to uInitrd for bootloader, fall back to copy if symlink fails
+ln -sfn "$(basename "${UINITRD_FILE}")" /boot/uInitrd 2>/dev/null || {
+    echo "Symlink failed, falling back to copy." >&2
+    cp -fv "${UINITRD_FILE}" /boot/uInitrd
+}
 
 echo "update-initramfs: fnnas: done." >&2
 exit 0
