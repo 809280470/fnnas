@@ -1,6 +1,6 @@
 #=====================================================================================
 # https://github.com/ophub/fnnas
-# Description: Build FnNAS Image
+# Description: Build FnNAS Image (Custom FnOS Source)
 #=====================================================================================
 
 name: Build FnNAS Image
@@ -9,22 +9,10 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
-      fnnas_base_version:
-        description: "Select fnnas base image version"
-        required: false
-        default: "rockchip_1253"
-        type: choice
-        options:
-          - amlogic_1252
-          - amlogic_693
-          - rockchip_1253
-          - rockchip_692
-          - allwinner_1254
-          - allwinner_691
       fnnas_board:
         description: "Select fnnas device board"
         required: false
-        default: "rockchip50"
+        default: "orangepi-zero3"
         type: choice
         options:
           - allwinner
@@ -272,10 +260,6 @@ on:
         description: "Set rootfs expansion size(GiB)"
         required: false
         default: "16"
-      fnnas_url:
-        description: "Custom fnnas image download url"
-        required: false
-        default: ""
       builder_name:
         description: "Set fnnas builder signature"
         required: false
@@ -314,7 +298,6 @@ jobs:
           sudo apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
           sudo apt-get -y install $(curl -fsSL https://ophub.org/ubuntu2604-make-fnnas-depends)
           sudo systemctl daemon-reload
-          #sudo apt-get -y full-upgrade
           sudo apt-get -y autoremove --purge
           sudo apt-get clean
           sudo sed -i '/NVM_DIR/d;/skel/d' /root/{.bashrc,.profile}
@@ -329,7 +312,6 @@ jobs:
       - name: Create virtual disk for extended storage
         id: disk
         run: |
-          # Get available space in exact GB
           root_avail=$(df --block-size=1G / | tail -1 | awk '{print $4}')
           root_size=$(( root_avail - 4 ))
           [[ "${root_size}" -gt 0 ]] || { echo "Error: Insufficient space on /: ${root_avail}G available"; exit 1; }
@@ -345,118 +327,45 @@ jobs:
           df -Th
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Download fnnas image [ ${{ inputs.fnnas_base_version }} ]
+      - name: Download FnOS image from custom source
         id: down
         working-directory: /builder
-        if: (!cancelled())
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Create directory
           [[ -d "fnnas" ]] || mkdir -p fnnas
 
-          input_url="${{ inputs.fnnas_url }}"
-          fnnas_base_version="${{ inputs.fnnas_base_version }}"
-          [[ -n "${fnnas_base_version}" ]] && build_tag="fnnas_${fnnas_base_version}" || build_tag="fnnas_save"
+          # ===== 飞牛官方 CDN 镜像（带签名的直链）=====
+          FNNOS_URL="https://download.liveupdate.fnnas.com/arm/image/1.2.0302/orangepi-zero3/fnos_Mainland-PE_arm_1.2.0302_orangepi-zero3_2283.img.gz?sign=83f6d5734a5696aeb165e553d1686a03&t=1786066617"
+          IMG_GZ="fnos_Mainland-PE_arm_1.2.0302_orangepi-zero3_2283.img.gz"
+          IMG_FILE="fnos_Mainland-PE_arm_1.2.0302_orangepi-zero3_2283.img"
+          # ===========================================
 
-          # -------------------------------------------------------
-          # Case A: URL specified
-          # -------------------------------------------------------
-          if [[ -n "${input_url}" ]]; then
-              echo "Custom URL detected: ${input_url}"
+          echo "Downloading FnOS image..."
+          echo "Source: ${FNNOS_URL}"
 
-              # Remove any parameters that may be included in the URL (?...)
-              clean_url="${input_url%%\?*}"
+          curl -fsSL "${FNNOS_URL}" -o "fnnas/${IMG_GZ}"
 
-              # Regex match GitHub Release URL format
-              # Format: https://github.com/<owner>/<repo>/releases/download/<tag>/<filename>
-              regex="github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)"
+          [[ $? -ne 0 ]] && echo "Error: Download failed." && exit 1
 
-              if [[ "${clean_url}" =~ $regex ]]; then
-                  # Extract information
-                  owner="${BASH_REMATCH[1]}"
-                  repo="${BASH_REMATCH[2]}"
-                  tag="${BASH_REMATCH[3]}"
-                  filename="${BASH_REMATCH[4]}"
+          echo "Extracting .img.gz..."
+          gunzip -f "fnnas/${IMG_GZ}"
 
-                  echo "Detected GitHub Release URL."
-                  echo "Repo: $owner/$repo | Tag: $tag | File: $filename"
+          [[ ! -f "fnnas/${IMG_FILE}" ]] && echo "Error: .img not found after extraction." && exit 1
 
-                  # Use gh cli to download
-                  gh release download "${tag}" \
-                      --repo "${owner}/${repo}" \
-                      --pattern "${filename}" \
-                      --dir "fnnas" \
-                      --clobber
+          echo "Image ready: fnnas/${IMG_FILE}"
+          ls -lh fnnas/
 
-                  # Check download result
-                  if [[ -f "fnnas/${filename}" ]]; then
-                      echo "Download success via gh-cli."
-                      echo "status=success" >> ${GITHUB_OUTPUT}
-                      exit 0
-                  else
-                      echo "Error: gh download failed."
-                      exit 1
-                  fi
-              else
-                  # If not a standard Release URL (e.g., API URL or third-party URL), fallback to curl
-                  echo "Using curl fallback..."
-                  latest_url="${input_url}"
-                  fnnas_filename=$(basename "${clean_url}")
-              fi
-
-          # -------------------------------------------------------
-          # Case B: Automatically fetch the latest version
-          # -------------------------------------------------------
-          else
-              echo "Auto-detecting latest release..."
-              latest_version=$(curl -s \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                  https://api.github.com/repos/ophub/fnnas/releases?per_page=20 | \
-                  jq -r --arg RTK "fnnas_base_image" \
-                  --arg BOARD "${fnnas_base_version}" \
-                  '[.[] | select(.tag_name | contains($RTK))] |
-                  map(.assets[] | select(.name | contains($BOARD) and endswith(".img.xz"))) |
-                  sort_by(.updated_at) |
-                  reverse |
-                  .[0] |
-                  {data: .updated_at, url: .url, name: .name}')
-
-              [[ -z "${latest_version}" || "${latest_version}" == "null" ]] && {
-              echo "Error: Failed to resolve FnNAS image download URL."
-              }
-
-              latest_url="$(echo ${latest_version} | jq -r '.url')"
-              fnnas_filename="$(echo ${latest_version} | jq -r '.name')"
-          fi
-
-          # -------------------------------------------------------
-          # Execute curl download (only if the above gh did not run)
-          # -------------------------------------------------------
-          echo "Downloading: ${fnnas_filename}"
-          echo "Source: ${latest_url}"
-
-          curl -fsSL \
-               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-               -H "Accept: application/octet-stream" \
-               "${latest_url}" \
-               -o "fnnas/${fnnas_filename}"
-
-          [[ "${?}" -ne "0" ]] && echo "Error: Download failed." && exit 1
-
-          # Create directory symlinks for packaging
+          # 创建目录软链接供后续 action 使用
           ln -sf /builder/fnnas ${{ github.workspace }}/fnnas
           ln -sf /builder/fnnas /home/runner/work/_actions/ophub/fnnas/main/fnnas
 
-          echo "build_tag=${build_tag}" >> ${GITHUB_ENV}
+          echo "build_tag=fnnas_orangepi-zero3_1.2.0302" >> ${GITHUB_ENV}
           echo "status=success" >> ${GITHUB_OUTPUT}
 
       - name: Package FnNAS for target boards
         if: ${{ steps.down.outputs.status == 'success' && !cancelled() }}
         uses: ophub/fnnas@main
         with:
-          fnnas_path: fnnas/*.img.xz
+          fnnas_path: fnnas/*.img
           fnnas_board: ${{ inputs.fnnas_board }}
           fnnas_kernel: ${{ inputs.fnnas_kernel }}
           auto_kernel: ${{ inputs.auto_kernel }}
@@ -476,9 +385,6 @@ jobs:
           make_latest: true
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            - Built based on the fnnas.com [official Arm64 image](https://github.com/ophub/fnnas/releases/tag/fnnas_base_image),
-              fully preserving the original official system experience.
-              Extends support to a wider range of Amlogic, Rockchip, and Allwinner devices.
-            - 基于 fnnas.com [官方 Arm64 镜像](https://github.com/ophub/fnnas/releases/tag/fnnas_base_image) 构建，
-              完整保留官方原版系统体验。
-              扩展支持更多基于 Amlogic、Rockchip 及 Allwinner 平台的设备。
+            - Built based on FnOS 1.2.0302 (orangepi-zero3) from official CDN.
+            - 基于飞牛官方 CDN 镜像 FnOS 1.2.0302 (orangepi-zero3) 构建。
+              完整保留官方原版系统体验，扩展适配更多 ARM 设备。
